@@ -8,10 +8,50 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from .normalize import normalize_event
-from .dedupe import dedupe_events
+# Best-effort import of normalization and dedupe; provide fallbacks if missing
+def _resolve(name: str) -> Optional[Callable]:
+    try:
+        module_name, fn_name = name.rsplit(":", 1)
+        mod = importlib.import_module(module_name)
+        fn = getattr(mod, fn_name, None)
+        return fn if callable(fn) else None
+    except Exception:
+        return None
 
-# Your modules and the exact fetch function they expose
+normalize_event = _resolve("scraping.normalize:normalize_event")
+if normalize_event is None:
+    # Fallback: passthrough with light shaping
+    def normalize_event(ev: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a minimally normalized event dict with common keys."""
+        return {
+            "source": ev.get("source"),
+            "id": ev.get("id") or ev.get("link"),
+            "title": ev.get("concert") or ev.get("title"),
+            "venue": ev.get("venue"),
+            "city": ev.get("city") or "Hong Kong",
+            "date": (ev.get("time_iso_list") or [None])[0],
+            "time": ev.get("time_text"),
+            "url": ev.get("link"),
+            "price_min": ev.get("price_min"),
+            "price_max": ev.get("price_max"),
+            "_raw": ev,  # keep the original for debugging
+        }
+
+dedupe_events = _resolve("scraping.dedupe:dedupe_events")
+if dedupe_events is None:
+    # Fallback: naive dedupe by (source, id or url, date)
+    def dedupe_events(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        seen = set()
+        out = []
+        for r in rows:
+            key = (r.get("source"), r.get("id") or r.get("url"), r.get("date"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+        return out
+
+# Your sources both expose fetch()
 SOURCES = [
     ("scraping.sources.lcsd_hkc", "fetch"),
     ("scraping.sources.livenation", "fetch"),
@@ -41,12 +81,16 @@ def import_fetch(module_path: str, fn_name: str) -> Optional[Callable[[], List[D
 
 def to_excel(rows: List[Dict[str, Any]], path: Path) -> None:
     import pandas as pd
+    cols = ["source","id","title","venue","city","date","time","url","price_min","price_max"]
     if not rows:
-        df = pd.DataFrame(columns=[
-            "source","id","title","venue","city","date","time","url","price_min","price_max"
-        ])
+        df = pd.DataFrame(columns=cols)
     else:
+        # Ensure consistent columns
         df = pd.DataFrame(rows)
+        for c in cols:
+            if c not in df.columns:
+                df[c] = None
+        df = df[cols]
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_excel(path, index=False)
 
