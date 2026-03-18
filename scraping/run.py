@@ -1,17 +1,16 @@
 # scraping/run.py
 from __future__ import annotations
-
+import importlib
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import Any, Callable, Dict, List, Optional
 
-# Import your existing modules
-from .sources.lcsd_hkc import fetch_lcsd_events  # adjust if function names differ
-from .sources.livenation import fetch_livenation_events  # adjust if needed
-from .normalize import normalize_event  # must return a normalized dict
-from .dedupe import dedupe_events       # must take list[dict] -> list[dict]
+from .normalize import normalize_event
+from .dedupe import dedupe_events
+
+COMMON_FN_NAMES = ("fetch_events", "fetch", "get_events", "scrape", "run", "main")
 
 def utc_today_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -23,42 +22,63 @@ def ensure_dirs() -> Dict[str, Path]:
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     return {"data": data_dir, "snap": snapshots_dir}
 
-def to_excel(rows: List[Dict[str, Any]], path: Path) -> None:
+def resolve_fetch_fn(module_path: str) -> Optional[Callable[[], List[Dict[str, Any]]]]:
     try:
-        import pandas as pd  # pandas is in requirements.txt
+        mod = importlib.import_module(module_path)
     except Exception as e:
-        print(f"[ERROR] pandas not available to write Excel: {e}", file=sys.stderr)
-        raise
+        print(f"[ERROR] Failed importing {module_path}: {e}", file=sys.stderr)
+        return None
+    for name in COMMON_FN_NAMES:
+        fn = getattr(mod, name, None)
+        if callable(fn):
+            return fn
+    print(f"[ERROR] No suitable fetch function found in {module_path}. "
+          f"Tried: {', '.join(COMMON_FN_NAMES)}", file=sys.stderr)
+    return None
 
+def to_excel(rows: List[Dict[str, Any]], path: Path) -> None:
+    import pandas as pd
     if not rows:
-        # Write an empty sheet with headers for discoverability
         df = pd.DataFrame(columns=[
             "source","id","title","venue","city","date","time","url","price_min","price_max"
         ])
     else:
         df = pd.DataFrame(rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
     df.to_excel(path, index=False)
 
 def main() -> int:
     paths = ensure_dirs()
     print(f"[INFO] Writing outputs under: {paths['data'].resolve()}")
 
+    sources = [
+        "scraping.sources.lcsd_hkc",
+        "scraping.sources.livenation",
+    ]
+
     all_events: List[Dict[str, Any]] = []
 
-    # Fetch from each source with error isolation
-    sources = []
-    # Adapt these callables to your real function signatures
-    sources.append(("lcsd_hkc", fetch_lcsd_events))
-    sources.append(("livenation", fetch_livenation_events))
-
-    for name, fn in sources:
+    for module_path in sources:
+        fn = resolve_fetch_fn(module_path)
+        if not fn:
+            continue
         try:
-            print(f"[INFO] Fetching from {name} ...", flush=True)
-            events = fn()  # ensure your function returns list[dict]
-            print(f"[INFO] {name}: fetched {len(events)} raw events")
+            print(f"[INFO] Fetching from {module_path} via {fn.__name__}() ...", flush=True)
+            result = fn()
+            if result is None:
+                count = 0
+                events = []
+            elif isinstance(result, list):
+                events = result
+                count = len(events)
+            else:
+                # If function returned a dict with 'events'
+                events = result.get("events", []) if isinstance(result, dict) else []
+                count = len(events)
+            print(f"[INFO] {module_path}: fetched {count} raw events")
             all_events.extend(events)
         except Exception as e:
-            print(f"[ERROR] {name} failed: {e}", file=sys.stderr)
+            print(f"[ERROR] {module_path} failed: {e}", file=sys.stderr)
 
     # Normalize
     normalized: List[Dict[str, Any]] = []
@@ -66,7 +86,7 @@ def main() -> int:
         try:
             normalized.append(normalize_event(ev))
         except Exception as e:
-            print(f"[WARN] normalize failed for event {ev.get('id')}: {e}", file=sys.stderr)
+            print(f"[WARN] normalize failed for event {ev}: {e}", file=sys.stderr)
 
     print(f"[INFO] Normalized events: {len(normalized)}")
 
@@ -96,20 +116,19 @@ def main() -> int:
             ensure_ascii=False,
             indent=2,
         )
-    print(f"[INFO] Wrote snapshot: {snapshot_path} ({snapshot_path.stat().st_size} bytes)")
+    print(f"[INFO] Wrote snapshot: {snapshot_path}")
 
     # Write Excel summary
     excel_path = paths["data"] / "output.xlsx"
     try:
         to_excel(deduped, excel_path)
-        print(f"[INFO] Wrote Excel: {excel_path} ({excel_path.stat().st_size} bytes)")
+        print(f"[INFO] Wrote Excel: {excel_path}")
     except Exception as e:
         print(f"[ERROR] Failed writing Excel: {e}", file=sys.stderr)
         return 3
 
-    # Non-zero exit if absolutely nothing was fetched to surface issues
     if len(deduped) == 0:
-        print("[WARN] No events produced; workflow will still succeed but no data changes.", file=sys.stderr)
+        print("[WARN] No events produced; check source modules or site availability.", file=sys.stderr)
 
     return 0
 
