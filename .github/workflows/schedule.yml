@@ -1,0 +1,38 @@
+name: Weekly Concert Scrape
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # Every Monday 03:00 UTC (11:00 HKT)
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/schedule.yml"
+      - "scraping/**"
+      - "requirements.txt"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run scraper
+        run: |
+          python -m scraping.run
+      - name: Commit artifacts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/output.xlsx data/snapshots || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Update concerts $(date -u +'%Y-%m-%dT%H:%MZ')"
+            git push
+          fi
