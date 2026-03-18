@@ -17,22 +17,33 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run scraper
         run: |
           python -m scraping.run
+
+      - name: List repo files for debugging
+        run: |
+          echo "=== Files up to depth 3 ==="
+          find . -maxdepth 3 -type f | sort || true
+
       - name: Commit artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/output.xlsx data/snapshots || true
+          git add -A data || true
           if ! git diff --cached --quiet; then
-            git commit -m "Update concerts $(date -u +'%Y-%m-%dT%H:%MZ')"
+            git commit -m "Update data $(date -u +'%Y-%m-%dT%H:%MZ')"
             git push
+          else
+            echo "No changes in data; nothing to commit."
           fi
